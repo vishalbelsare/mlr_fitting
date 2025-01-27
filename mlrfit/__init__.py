@@ -8,3 +8,5 @@ from mlrfit.low_rank import *
 from mlrfit.plots import *
 from mlrfit.example_matrices import *
 from mlrfit.hodlr_methods import *
+from mlrfit.mlr_symm_hpar_matmul import *
+from mlrfit.psd_factorised import *

@@ -54,7 +54,7 @@ def main():
     print("PASSED hat_A.solve and hat_A.matvec implementation tests")
 
     M = 20
-    m, n  = 300, 400
+    m, n  = 400, 300
     rank = 40
 
     for _ in tqdm(range(M)):
@@ -67,12 +67,11 @@ def main():
         # least squares
         b = np.random.randn(m, 1)
         
-        x1 = hat_A.lsmr(b, tol=1e-8)
-        x2 = lsmr(hat_A_val, b, atol=1e-08, btol=1e-08)[0].reshape(-1,1)
-        assert mf.rel_diff(mf.rel_diff(hat_A.matvec(x1), den=b), \
-               mf.rel_diff(hat_A_val @ x2, den=b)) < 0.2
+        x1 = hat_A.lstsq(b)
+        assert np.allclose((hat_A_val.T @ hat_A_val @ x1).flatten(), \
+                       (hat_A_val.T @ b).flatten())
         
-    print("PASSED hat_A.lsmr implementation tests")
+    print("PASSED hat_A.lstsq implementation tests")
 
 
 

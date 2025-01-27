@@ -1,5 +1,5 @@
 import copy
-from typing import List, Tuple, Callable, TypedDict, List, Set, Optional 
+from typing import List, Tuple, Callable, TypedDict, List, Set, Optional, Union 
 
 import numpy as np
 import numba as nb
@@ -12,6 +12,7 @@ import torch
 from mlrfit.utils import *
 from mlrfit.fit import *
 from mlrfit.hpartitioning import *
+from mlrfit.psd_factorised import *
 
 
 import scipy
@@ -126,7 +127,7 @@ class MLRMatrix:
         return B, C
 
 
-    def factor_fit(self, A:np.ndarray, ranks:np.ndarray, hpart:HpartDict, method='bcd', order='tbu', \
+    def factor_fit(self, A:Union[np.ndarray, Tuple[np.ndarray,np.ndarray]], ranks:np.ndarray, hpart:HpartDict, method='bcd', order='tbu', \
                         eps_ff=0.01, symm=False, PSD=False, svds_v0=False, max_iters_ff=100, \
                         freq=1000, warm_start=False, printing=False, epoch_len=10, init_type='bcd'):
         """
@@ -140,7 +141,11 @@ class MLRMatrix:
         self.ranks = ranks
         self._update_hpart(hpart)
         # permute rows and cols to place partitions on the diagonal
-        perm_A = A[self.pi_rows, :][:, self.pi_cols]
+        if isinstance(A, np.ndarray):
+            perm_A = A[self.pi_rows, :][:, self.pi_cols]
+        elif isinstance(A, tuple): # A = A_b A_c^T
+            A_B, A_C = A
+            perm_A = (A_B[self.pi_rows, :], A_C[self.pi_cols, :])
         if 'bcd' in method:
             B, C, losses = self._factor_fit_bcd(perm_A, eps_ff=eps_ff, order=order, \
                                                  B=B0, C=C0, svds_v0=svds_v0, PSD=PSD, symm=symm, \
@@ -150,8 +155,8 @@ class MLRMatrix:
             B, C, losses  = self._factor_fit_als(perm_A, eps_ff=eps_ff, B=B0, C=C0, PSD=PSD, symm=symm, \
                                                  printing=printing, freq=freq, init_type=init_type,\
                                                  max_iters_ff=max_iters_ff, epoch_len=epoch_len)[:3]
-        self.B, self.C = B, C
         del perm_A
+        self.B, self.C = B, C
         return losses
 
 
@@ -160,12 +165,14 @@ class MLRMatrix:
         num_levels = ranks.size
         if return_delta:
             delta_rm1, delta_rp1 = np.zeros(num_levels), np.zeros(num_levels)
-            b, c = np.zeros((perm_A.shape[0], num_levels)), np.zeros((perm_A.shape[1], num_levels))
+            b, c = np.zeros((B.shape[0], num_levels)), np.zeros((C.shape[0], num_levels))
+        
+        rows_lk = nb.typed.List(self.hpart['rows']['lk'])
+        cols_lk = nb.typed.List(self.hpart['cols']['lk'])
         # sweep over the hierarchy in the given order
         for level in levels:
             # approximate block diagonals on level
-            R = compute_perm_residual_jit(perm_A, B, C, level, nb.typed.List(self.hpart['rows']['lk']),\
-                                                        nb.typed.List(self.hpart['cols']['lk']), ranks)
+            R = compute_perm_residual(perm_A, B, C, level, rows_lk, cols_lk, ranks)
             B_level, C_level, delta_rm1_lev, delta_rp1_lev, b_level, c_level = \
                     single_level_factor_fit(R, ranks, self.hpart, level, svds_v0=svds_v0, \
                                             symm=symm, PSD=PSD, \
@@ -185,7 +192,7 @@ class MLRMatrix:
             return B,  C
         
 
-    def _factor_fit_bcd(self, perm_A:np.ndarray, ranks:Optional[np.ndarray]=None, eps_ff=0.01, \
+    def _factor_fit_bcd(self, perm_A:Union[np.ndarray, Tuple[np.ndarray,np.ndarray]], ranks:Optional[np.ndarray]=None, eps_ff=0.01, \
                     B=None, C=None, PSD=False, svds_v0=False, symm=False, freq=1000, \
                     max_iters_ff=10**2, printing=False, epoch_len=10, order='tbu', init_type='bcd'):
         """
@@ -217,17 +224,15 @@ class MLRMatrix:
         if B is None: 
             B, C = self.init_B_C(ranks, self.hpart, init_type=init_type, perm_A=perm_A, params=params)
             # compute initial loss 
-            perm_hat_A = compute_perm_hat_A_jit(B, C, rows_lk, cols_lk, ranks)
-            losses_ff = [rel_diff(perm_hat_A, den=perm_A)]
+            losses_ff = [frob_loss(perm_A, B, C, rows_lk, cols_lk, ranks)]
             if itr % freq == 0 and printing:
                 print(f"{itr=}, {losses_ff[-1]}, {ranks}")
             itr += 1
-            del perm_hat_A
         else: 
             B, C = copy.deepcopy(B), copy.deepcopy(C) 
 
         if itr % freq == 0 and printing:
-            print(f"{itr=}, {losses_ff[-1]}, {ranks}")
+            print(f"{itr=}, {losses_ff}, {ranks}")
 
         while itr < max_iters_ff:
             start_time = time.time()
@@ -235,10 +240,8 @@ class MLRMatrix:
             B, C = self._single_epoch_bcd(perm_A, B, C, ranks, levels, params, return_delta=False)
             time_v_epoch = time.time() - start_time
             start_time = time.time()
-            # compute loss at the end of every epoch
-            perm_hat_A = compute_perm_hat_A_jit(B, C, rows_lk, cols_lk, ranks)
-            losses_ff += [rel_diff(perm_hat_A, den=perm_A)]
-            del perm_hat_A
+            # compute loss at the end of every epoch 
+            losses_ff += [frob_loss(perm_A, B, C, rows_lk, cols_lk, ranks)]
             time_loss = time.time() - start_time
 
             if itr % freq == 0 and printing:
@@ -251,9 +254,7 @@ class MLRMatrix:
             itr += 1 
         B, C, delta_rm1, delta_rp1, b, c = self._single_epoch_bcd(perm_A, B, C, ranks, np.arange(num_levels), \
                                                                   params, return_delta=True)
-        perm_hat_A = compute_perm_hat_A_jit(B, C, rows_lk, cols_lk, ranks)
-        losses_ff += [rel_diff(perm_hat_A, den=perm_A)]
-        del perm_hat_A
+        losses_ff += [frob_loss(perm_A, B, C, rows_lk, cols_lk, ranks)]
         return B, C, losses_ff, delta_rm1, delta_rp1, b, c
     
 
@@ -536,7 +537,7 @@ class MLRMatrix:
                 cols = np.concatenate(cols + [np.array([n])])
                 # print(f"{num_blocks=}, {rows.size=}, {cols.size=}")
                 assert not balanced or rows.size == min(m, n) + 1 and cols.size == min(m, n) + 1, \
-                    print(rows.size, min(m, n) + 1, cols.size, min(m, n) + 1, set(range(m)).difference(rows))
+                    f"{rows.size}, {min(m, n) + 1}, {cols.size}, {min(m, n) + 1}, {set(range(m)).difference(rows)}"
                 assert not balanced or len(set(rows)) == min(m, n) + 1 and len(set(cols)) == min(m, n) + 1
                 hpart['rows']['lk'] += [ rows ]
                 hpart['cols']['lk'] += [ cols ]
@@ -569,7 +570,7 @@ class MLRMatrix:
                     count1 += sep_r_bl[-1]
                     count2 += sep_c_bl[-1]
                     r1, c1 = r2, c2
-                assert count1 == m and count2 == n, print(f"{m=}, {count1=}, {n=}, {count2=}")
+                assert count1 == m and count2 == n, f"{m=}, {count1=}, {n=}, {count2=}"
                 perm_rows = new_perm_rows
                 perm_cols = new_perm_cols
                 # permute the htree, B and C to respect the perm_rows/cols on the leaf level

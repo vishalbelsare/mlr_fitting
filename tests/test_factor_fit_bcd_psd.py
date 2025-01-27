@@ -39,6 +39,8 @@ def direct_bcd_covar_diag(A, orders, n, dim):
         ff_losses[order] = losses
     return ff_losses
 
+
+
 def main():
     M = 100
     m = n = 100
@@ -72,7 +74,7 @@ def main():
     # Test PSD block coordinate descent implementation
     m = n = 200
     hpart = mf.random_hpartition(m,  n, symm=True)
-    num_levels = len(hpart)
+    num_levels = len(hpart["cols"]["lk"]) - 1
     mf.test_hpartition(hpart, m, n)
     eps = 1e-4
 

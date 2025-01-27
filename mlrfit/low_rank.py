@@ -1,8 +1,9 @@
 import numpy as np
-from scipy.sparse.linalg import svds, eigsh
+from scipy.sparse.linalg import svds, eigsh, LinearOperator
 import numba as nb
 
 from mlrfit.utils import *
+from mlrfit.psd_factorised import *
 
 
 def frob_low_rank(A, dim=None, symm=False, v0=None):
@@ -12,7 +13,7 @@ def frob_low_rank(A, dim=None, symm=False, v0=None):
     """
     M =  min(A.shape[0], A.shape[1])
     if dim is None: dim = M
-    dim = min(dim, min(A.shape[0], A.shape[1]))
+    dim = min(dim, min(A.shape[0], A.shape[1])) 
     if dim < M:
         try:
             U, sigmas, Vt = svds(A, k=dim, which='LM', v0=v0)
@@ -25,6 +26,7 @@ def frob_low_rank(A, dim=None, symm=False, v0=None):
                 print(f"svds fail: decrease tol")
                 U, sigmas, Vt = svds(A, k=dim, which='LM', v0=v0, tol=1e-2)
     else:
+        assert not isinstance(A, LinearOperator), print("need dense matrix for full svd")
         U, sigmas, Vt = np.linalg.svd(A, full_matrices=False, hermitian=symm)
     # decreasing order of sigmas
     idx = np.argsort(sigmas)[::-1]
@@ -45,6 +47,7 @@ def frob_low_rank_psd(A, dim=None, v0=None):
     if dim < min(A.shape):
         lambdas, V = eigsh(A, k=dim, which='LA', v0=v0)
     else:
+        assert not isinstance(A, LinearOperator), print("need dense matrix for full eigendecomposition")
         lambdas, V = np.linalg.eigh(A)
     idx = np.argsort(lambdas)[::-1] # decreasing  order
     # (lambdas_1)_+ >= ... >= (lambdas_j)_+ >= 0

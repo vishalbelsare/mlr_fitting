@@ -10,6 +10,7 @@ import copy
 
 from scipy.sparse import csr_matrix, coo_matrix
 from scipy.sparse.csgraph import shortest_path
+from scipy.linalg import block_diag
 
 import linecache
 import os

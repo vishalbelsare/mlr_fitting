@@ -4,6 +4,7 @@ from typing import List, Union
 
 from mlrfit.utils import *
 from mlrfit.low_rank import *
+from mlrfit.psd_factorised import *
 
 import torch
 import torch.nn as nn
@@ -16,7 +17,7 @@ from memory_profiler import profile as mprofile
 
 # ---------------------- Block coordinate descent (BCD) ----------------------
 
-def single_level_factor_fit(R:np.ndarray, ranks:np.ndarray, hpart:HpartDict, level:int, \
+def single_level_factor_fit(R:Union[np.ndarray, LinOpResidualMatrix], ranks:np.ndarray, hpart:HpartDict, level:int, \
                             svds_v0=False, symm=False, PSD=False, B_level=None, C_level=None):
     """
     Return compressed B_l, C_l from block diagonal approximation of R
@@ -71,7 +72,7 @@ def update_single_block_delta_psd_jit(B_level, b_level, delta_rp1, delta_rm1, V,
     return (delta_rm1, delta_rp1)
 
 
-def single_level_factor_fit_psd(R:np.ndarray, ranks:np.ndarray, hpart:HpartDict, level:int, \
+def single_level_factor_fit_psd(R:Union[np.ndarray, LinOpResidualMatrix], ranks:np.ndarray, hpart:HpartDict, level:int, \
                                 svds_v0=False, B_level0=None):
     """
     Symmetric PSD hat_A
@@ -101,7 +102,10 @@ def single_level_factor_fit_psd(R:np.ndarray, ranks:np.ndarray, hpart:HpartDict,
         if svds_v0: # v0 has components for every direction of Krylov space
             v0 = B_level0[r1:r2].sum(axis=1)
             if np.linalg.norm(v0) < 1e-6: v0 = None
-        V, lambdas = frob_low_rank_psd(R[r1:r2, r1:r2], dim = dim+1, v0=v0)
+        if dim+1 < r2-r1 or not isinstance(R, LinOpResidualMatrix):
+            V, lambdas = frob_low_rank_psd(R[r1:r2, r1:r2], dim = dim+1, v0=v0)
+        else: # full svd need dense matrix
+            V, lambdas = frob_low_rank_psd(R.todense(r1, r2, r1, r2), dim = dim+1, v0=v0)
         # print(f"{level=}, {block=}, {dim=}, {lambdas.size=}, {delta_rm1=}, {delta_rp1=}")
         if lambdas.size == 0: continue
         delta_rm1, delta_rp1 = update_single_block_delta_psd_jit(B_level, b_level, delta_rp1, delta_rm1, \
@@ -151,7 +155,7 @@ def update_single_block_delta_general_jit(B_level, C_level, b_level, c_level, de
     return (delta_rm1, delta_rp1)
 
 
-def single_level_factor_fit_general(R:np.ndarray, ranks:np.ndarray, hpart:HpartDict, level:int,\
+def single_level_factor_fit_general(R:Union[np.ndarray, LinOpResidualMatrix], ranks:np.ndarray, hpart:HpartDict, level:int,\
                                     svds_v0=False, symm=False, B_level0=None, C_level0=None):
     """
     Return list of BCt from block diagonal approximation of R
@@ -188,7 +192,11 @@ def single_level_factor_fit_general(R:np.ndarray, ranks:np.ndarray, hpart:HpartD
             else:
                 v0 = C_level0[c1:c2].sum(axis=1)
             if np.linalg.norm(v0) < 1e-5: v0 = None
-        U, Vt, sigmas = frob_low_rank(R[r1:r2, c1:c2], dim = dim+1, symm=symm, v0=v0)
+
+        if dim+1 < min(r2-r1, c2-c1) or not isinstance(R, LinOpResidualMatrix):
+            U, Vt, sigmas = frob_low_rank(R[r1:r2, c1:c2], dim = dim+1, symm=symm, v0=v0)
+        else: # full svd need dense matrix 
+            U, Vt, sigmas = frob_low_rank(R.todense(r1, r2, c1, c2), dim = dim+1, symm=symm, v0=v0)
         
         delta_rm1, delta_rp1 = update_single_block_delta_general_jit(B_level, C_level, b_level, \
                                       c_level, delta_rp1, delta_rm1, \
@@ -281,7 +289,7 @@ def torch_cg_step(A:torch.Tensor, hat_A:torch.Tensor, var_B:torch.Tensor, var_C:
         var_C.data -= t*d_current
         
 
-def als_factor_fit_alt_cg(A, B, C, hpart:HpartDict, ranks:np.ndarray, epoch_len=1, update=0, normalization=1):
+def als_factor_fit_alt_cg(A, B, C, hpart:HpartDict, ranks:np.ndarray, epoch_len=10, update=0, normalization=1):
     """
     Alternating Least Squares (ALS) for finding B and C
     using CG (The Fletcher-Reeves Method)
